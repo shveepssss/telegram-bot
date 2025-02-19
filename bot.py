@@ -1,125 +1,453 @@
 # -*- coding: utf-8 -*-
 
+import logging
+import asyncio
+import aiohttp
+import requests
+import schedule
+import time
+import os
+from aiogram import Bot, Dispatcher, Router, types
+from aiogram.filters import Command
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.memory import MemoryStorage
+from datetime import datetime, timedelta
 import pandas as pd
-import datetime
+from openpyxl import load_workbook
+from openpyxl.utils import range_boundaries
+import logging
+import openpyxl
+from datetime import datetime, timedelta
 import re
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import sys
+import pytz
 
-# Укажите путь к файлу расписания
-EXCEL_FILE = "44.03.01 Информатика.xlsx"
-GROUPS = {
-    "Группа 1": "09.ПООБ.22.И.1*1",
-    "Группа 2": "09.ПООБ.22.И.1*2"
-}
+# Настройка логирования и бота
+logging.basicConfig(level=logging.INFO)
+TOKEN = "7766027837:AAFFORwPFg_CCZ5iEx0saTzCQL-ihXoHvNA"
+bot = Bot(token=TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
+router = Router()
 
-# Загружаем данные
-xls = pd.ExcelFile(EXCEL_FILE)
-df = pd.read_excel(xls, sheet_name="Лист1")
+SCHEDULE_URL = "https://disk.yandex.ru/i/zBdSFy9HRBb9Pw"
+FILE_PATH = "44.03.01 Информатика.xlsx"
+TEMP_FILE_PATH = "temp.xlsx"
+last_update_time = None
+UPDATE_INFO_FILE = "last_update.txt"
+UPDATE_TIME = "22:00" 
 
-# Определяем названия колонок
-df.columns = df.iloc[1]  # Берем строку с заголовками
-df = df[2:].reset_index(drop=True)  # Удаляем лишние строки
+# Хранение списка пользователей
+def load_users():
+    if os.path.exists("users.txt"):
+        with open("users.txt", "r") as file:
+            return set(int(line.strip()) for line in file)
+    return set()
 
-# Приводим дату в правильный формат
-df[df.columns[0]] = pd.to_datetime(df[df.columns[0]], errors="coerce").dt.date
+def save_user(user_id):
+    if user_id not in subscribed_users:
+        with open("users.txt", "a") as file:
+            file.write(f"{user_id}\n")
+        subscribed_users.add(user_id)
 
-# Функция поиска расписания по дате и группе
-def get_schedule(date, group):
-    day_schedule = df[df[df.columns[0]] == date][[df.columns[1], group]].dropna()
-    
-    if day_schedule.empty:
-        return "Занятий нет."
+subscribed_users = load_users()
 
-    schedule_text = f"📅 {date}:\n\n👥 {group}:\n"
-    for _, row in day_schedule.iterrows():
-        schedule_text += f"{row[df.columns[1]]}\n{row[group]}\n\n"
-
-    return schedule_text.strip()
-
-# Функция запроса подгруппы
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [["Группа 1"], ["Группа 2"]]
-    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-    await update.message.reply_text("Выберите свою подгруппу:", reply_markup=reply_markup)
-
-# Функция обработки выбора подгруппы
-async def choose_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    group = update.message.text.strip()
-    if group in GROUPS:
-        context.user_data["group"] = GROUPS[group]
-        keyboard = [["Расписание на сегодня"], ["Расписание на завтра"], ["Расписание на неделю"]]
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        await update.message.reply_text(f"Вы выбрали {group}. Теперь выберите расписание на какой день вы хотите увидеть или введите дату (ДД.ММ.ГГГГ) самостоятельно:", reply_markup=reply_markup)
+@dp.message(Command(commands=['subscribe']))
+async def subscribe(message: types.Message):
+    user_id = message.from_user.id
+    if user_id not in subscribed_users:
+        save_user(user_id)
+        await message.answer("✅ Вы подписаны на уведомления об обновлении расписания!")
     else:
-        return  # Если введено что-то другое — ничего не делаем
+        await message.answer("📢 Вы уже подписаны на уведомления!")
 
-# Функции получения расписания
-async def schedule_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "group" not in context.user_data:
-        await update.message.reply_text("Сначала выберите подгруппу с помощью команды /start.")
-        return
-    today = datetime.date.today()
-    await update.message.reply_text(get_schedule(today, context.user_data["group"]))
+# Функция загрузки даты последнего обновления
+def load_last_update():
+    if os.path.exists(UPDATE_INFO_FILE):
+        with open(UPDATE_INFO_FILE, "r") as file:
+            return file.read().strip()
+    return "Неизвестно"
 
-async def schedule_tomorrow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "group" not in context.user_data:
-        await update.message.reply_text("Сначала выберите подгруппу с помощью команды /start.")
-        return
-    tomorrow = datetime.date.today() + datetime.timedelta(days=1)
-    await update.message.reply_text(get_schedule(tomorrow, context.user_data["group"]))
+def save_last_update(timestamp):
+    with open(UPDATE_INFO_FILE, "w") as file:
+        file.write(timestamp)
 
-async def schedule_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "group" not in context.user_data:
-        await update.message.reply_text("Сначала выберите подгруппу с помощью команды /start.")
-        return
-    today = datetime.date.today()
-    next_week = df[(df[df.columns[0]] >= today) & (df[df.columns[0]] < today + datetime.timedelta(days=7))]
+last_update_time = load_last_update()
 
-    schedule_text = ""
-    for date in next_week[df.columns[0]].unique():
-        day_schedule = df[df[df.columns[0]] == date][[df.columns[1], context.user_data["group"]]].dropna()
-        if not day_schedule.empty:
-            schedule_text += f"📅 {date}:\n\n👥 {context.user_data['group']}:\n"
-            for _, row in day_schedule.iterrows():
-                schedule_text += f"{row[df.columns[1]]}\n{row[context.user_data['group']]}\n\n"
+def get_last_update_time():
+    """Читает дату последнего обновления из файла."""
+    if os.path.exists("last_update.txt"):
+        with open("last_update.txt", "r") as file:
+            return file.read().strip()
+    return "Неизвестно"
 
-    await update.message.reply_text(schedule_text if schedule_text else "Занятий нет.")
+update_time = get_last_update_time()
 
-# Обработчик сообщений с датой
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "group" not in context.user_data:
-        await update.message.reply_text("Сначала выберите подгруппу с помощью команды /start.")
-        return
+def get_direct_link(public_url):
+    """Получить прямую ссылку на файл с Яндекс.Диска."""
+    api_url = "https://cloud-api.yandex.net/v1/disk/public/resources/download"
+    params = {"public_key": public_url}
+    response = requests.get(api_url, params=params)
+    if response.status_code == 200:
+        return response.json().get("href")
+    else:
+        logging.error(f"Ошибка получения ссылки: {response.status_code}")
+        return None
+
+async def download_schedule():
+    """Скачивание расписания с Яндекс.Диска с предварительным сравнением."""
+    global last_update_time
+    direct_link = get_direct_link(SCHEDULE_URL)
+    if not direct_link:
+        return False
+
+    # Переименовываем текущий файл в temp
+    if os.path.exists(FILE_PATH):
+        os.rename(FILE_PATH, TEMP_FILE_PATH)
+
+    response = requests.get(direct_link)
+    if response.status_code == 200:
+        with open(FILE_PATH, "wb") as file:
+            file.write(response.content)
+
+        # Проверяем изменения в файлах
+        if os.path.exists(TEMP_FILE_PATH):
+            if compare_excel_files(TEMP_FILE_PATH, FILE_PATH):
+                os.remove(FILE_PATH)  # Удаляем новый файл
+                os.rename(TEMP_FILE_PATH, FILE_PATH)  # Возвращаем старый
+                logging.info("Файл не изменился, обновление отменено.")
+                return False
+            else:
+                os.remove(TEMP_FILE_PATH)  # Удаляем старый файл
+
+        last_update_time = datetime.now().strftime('%d.%m.%Y %H:%M')
+        save_last_update(last_update_time)
+        logging.info(f"Файл {FILE_PATH} успешно обновлен.")
+
+        await notify_users_after_update()  # Уведомляем пользователей
+        return True
+    else:
+        logging.error(f"Ошибка загрузки файла: {response.status_code}")
+        return False
+
     
-    user_message = update.message.text.strip()
-    if re.match(r"\d{2}\.\d{2}\.\d{4}", user_message):
+async def manual_download():
+    """Скачивание расписания с Яндекс.Диска."""
+    global last_update_time
+    direct_link = get_direct_link(SCHEDULE_URL)
+    if not direct_link:
+        return False
+
+    response = requests.get(direct_link)
+    if response.status_code == 200:
+        with open(TEMP_FILE_PATH, "wb") as file:
+            file.write(response.content)
+
+        if os.path.exists(FILE_PATH):
+            os.remove(FILE_PATH)
+        os.rename(TEMP_FILE_PATH, FILE_PATH)
+
+        last_update_time = datetime.now().strftime('%d.%m.%Y %H:%M')
+        save_last_update(last_update_time)
+        logging.info(f"Файл {FILE_PATH} успешно обновлен.")
+
+        await notify_users_after_update() # Вызов уведомления после обновления
+        return True
+    else:
+        logging.error(f"Ошибка загрузки файла: {response.status_code}")
+        return False
+
+
+def compare_excel_files(file1, file2):
+    """Сравнивает столбцы E и F двух файлов."""
+    try:
+        df1 = pd.read_excel(file1, usecols=[4, 5])
+        df2 = pd.read_excel(file2, usecols=[4, 5])
+        return df1.equals(df2)
+    except Exception as e:
+        logging.error(f"Ошибка сравнения файлов: {e}")
+        return False
+
+
+async def notify_users():
+    """Оповещение пользователей о начале и окончании обновления."""
+    for user_id in subscribed_users:
         try:
-            date = datetime.datetime.strptime(user_message, "%d.%m.%Y").date()
-            response = get_schedule(date, context.user_data["group"])
-        except ValueError:
-            response = "Некорректный формат даты. Используйте ДД.ММ.ГГГГ."
+            await bot.send_message(user_id, "♻️ Пожалуйста, подождите, обновление расписания...")
+        except Exception as e:
+            logging.error(f"Ошибка при отправке сообщения пользователю {user_id}: {e}")
+
+async def notify_users_after_update():  # Функция для уведомления после обновления
+    await asyncio.sleep(5)  # Даем время на отправку
+    for user_id in subscribed_users:
+        try:
+            await bot.send_message(user_id, "📅 Расписание обновлено! Нажмите /start для обновления данных.")
+        except Exception as e:
+            logging.error(f"Ошибка при отправке сообщения пользователю {user_id}: {e}")
+
+async def update_and_restart():
+    """Запускает обновление и перезапуск бота."""
+    success = await download_schedule()
+    if success:
+        await notify_users()
+        os.execv(sys.executable, [sys.executable] + sys.argv)  # Перезапуск кода
     else:
-        return  # Не обрабатываем случайные сообщения
+        logging.error("Обновление не удалось.")
 
-    await update.message.reply_text(response)
+async def manual_update_and_restart():
+    """Запускает обновление и перезапуск бота."""
+    await notify_users()
+    success = await manual_download()
+    if success:
+        os.execv(sys.executable, [sys.executable] + sys.argv)  # Перезапуск кода
+    else:
+        logging.error("Обновление не удалось.")
 
-# Основной запуск бота
-def main():
-    TOKEN = "7766027837:AAFFORwPFg_CCZ5iEx0saTzCQL-ihXoHvNA"  # Замените на свой токен
-    app = Application.builder().token(TOKEN).build()
+@dp.message(Command(commands=['update_schedule']))
+async def manual_update(message: types.Message):
+    await message.answer("⚙️ Обновляю расписание вручную...")
+    last_update_time = datetime.now().strftime('%d.%m.%Y %H:%M')
+    save_last_update(last_update_time)
+    await manual_update_and_restart()
 
-    # Добавляем обработчики команд
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.Regex("Группа 1|Группа 2"), choose_group))
-    app.add_handler(MessageHandler(filters.Regex("Расписание на сегодня"), schedule_today))
-    app.add_handler(MessageHandler(filters.Regex("Расписание на завтра"), schedule_tomorrow))
-    app.add_handler(MessageHandler(filters.Regex("Расписание на неделю"), schedule_week))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+async def auto_update():
+    """Фоновая задача по проверке обновлений расписания."""
+    while True:
+        now = datetime.now().strftime("%H:%M")
+        await asyncio.sleep(60)  # Проверка каждую минуту
+        if now == UPDATE_TIME:
+            logging.info("Начинаю автоматическое обновление...")
+            await update_and_restart()
+    
 
-    print("Бот запущен...")
+# Функция для подготовки данных из Excel
+def unmerge_and_fill_cells(sheet):
+    """Разъединяет объединённые ячейки и заполняет каждую значением верхней левой."""
+    for merged_cell in list(sheet.merged_cells.ranges):
+        min_col, min_row, max_col, max_row = range_boundaries(str(merged_cell))
+        top_left_value = sheet.cell(row=min_row, column=min_col).value  # Берём значение верхней левой ячейки
+        sheet.unmerge_cells(str(merged_cell))  # Разъединяем ячейки
 
-    app.run_polling()
+        for row in range(min_row, max_row + 1):
+            for col in range(min_col, max_col + 1):
+                sheet.cell(row=row, column=col).value = top_left_value  # Заполняем разъединённые ячейки
+
+def clean_column_b(file_path):
+    """Удаляет лишние пробелы и переносы строк в столбце B."""
+    wb = load_workbook(file_path)
+    sheet = wb.active
+
+    for row in sheet.iter_rows(min_col=2, max_col=2, min_row=2, values_only=False):
+        cell = row[0]
+        if cell.value:
+            cell.value = str(cell.value).strip().replace("\n", "  ")
+
+    wb.save("44.03.01 Информатика_unmerged.xlsx")
+
+# Основной код
+wb = load_workbook("44.03.01 Информатика.xlsx")
+sheet = wb.active
+unmerge_and_fill_cells(sheet)
+wb.save("44.03.01 Информатика_unmerged.xlsx")
+
+clean_column_b("44.03.01 Информатика_unmerged.xlsx")  # Очистка столбца B
+
+
+# Открываем новый файл после обработки объединенных ячеек
+def load_transformed_schedule(file_path="44.03.01 Информатика_unmerged.xlsx"):
+    if 'openpyxl' in sys.modules:
+        del sys.modules['openpyxl']  # Удаляем кеш openpyxl
+    if 'pandas' in sys.modules:
+        del sys.modules['pandas']  # Удаляем кеш pandas
+
+    wb = load_workbook(file_path, data_only=True)  # Читаем заново
+    ws = wb.active
+    data = ws.values
+    columns = next(data)
+    df = pd.DataFrame(data, columns=columns)
+    return df
+
+
+# Используем новый файл для работы в get_schedule
+df = load_transformed_schedule()
+
+# Функция получения расписания
+def get_schedule(group, date):
+
+    df = load_transformed_schedule()  # Загружаем актуальные данные
+    
+    schedule = ""
+    date_str = date.strftime("%Y-%m-%d")
+    found_date = False
+    practice_counter = 0  # Счётчик строк с практикой
+
+    for i in range(len(df)):
+        cell_date = pd.to_datetime(df.iloc[i, 0], errors='coerce')
+        if pd.notna(cell_date) and cell_date.strftime("%Y-%m-%d") == date_str:
+            found_date = True
+            for j in range(7):  # Проверяем 7 строк под текущей датой
+                time_info = df.iloc[i + j, 1]  # Например: "1 пара 9.00-10.30"
+                group_1_schedule = df.iloc[i + j, 4]
+                group_2_schedule = df.iloc[i + j, 5]
+
+                # Проверяем строки на наличие практики
+                if group_1_schedule and "практика" in group_1_schedule.lower():
+                    practice_counter += 1
+                    continue
+
+                if pd.notna(time_info):
+                    # Используем регулярное выражение для выделения номера пары и времени
+                    match = re.match(r"(\d+ пара)\s+(\d{1,2}\.\d{2}-\d{1,2}\.\d{2})", time_info)
+                    if match:
+                        pair_number = match.group(1)
+                        pair_time = match.group(2)
+                    else:
+                        pair_number, pair_time = time_info, ""  # Если не удалось разделить корректно
+                    
+                    # Формируем строку расписания
+                    if pd.notna(group_1_schedule) and pd.notna(group_2_schedule) and group_1_schedule == group_2_schedule:
+                        schedule += f"📚{pair_number}📚\n{pair_time}\n🫂{group_1_schedule}\n"
+                    elif group == 1 and pd.notna(group_1_schedule):
+                        schedule += f"📚{pair_number}📚\n{pair_time}\n{group_1_schedule}\n"
+                    elif group == 2 and pd.notna(group_2_schedule):
+                        schedule += f"📚{pair_number}📚\n{pair_time}\n{group_2_schedule}\n"
+
+
+            # Если нашлись строки с практикой — добавляем строку "Практика в школе"
+            if practice_counter > 0:
+                schedule += "Практика в школе.\n"
+            break
+        
+    return schedule if found_date and schedule.strip() else "Нет занятий.\n"
+
+
+# Функция для поиска следующей пары
+def get_next_class(group, date, current_time):
+    schedule = ""
+    date_str = date.strftime("%Y-%m-%d")
+    next_class = "Сегодня больше нет занятий."
+    practice_counter = 0  # Счётчик строк с практикой
+
+    for i in range(len(df)):
+        cell_date = pd.to_datetime(df.iloc[i, 0], errors='coerce')
+        if pd.notna(cell_date) and cell_date.strftime("%Y-%m-%d") == date_str:
+            for j in range(7):
+                time_info = df.iloc[i + j, 1]
+                group_1_schedule = df.iloc[i + j, 4]
+                group_2_schedule = df.iloc[i + j, 5]
+
+                # Проверяем строки на наличие практики
+                if group_1_schedule and "практика" in group_1_schedule.lower():
+                    practice_counter += 1
+                    continue
+                try:
+                    pair_start_time = re.search(r"(\d{1,2}\.\d{2})", time_info).group(1)
+                    pair_start_time_dt = datetime.strptime(pair_start_time, "%H.%M")
+
+                    if pd.notna(time_info):
+                        match = re.match(r"(\d+ пара)\s+(\d{1,2}\.\d{2}-\d{1,2}\.\d{2})", time_info)
+                        if match:
+                            pair_number, pair_time = match.groups()
+                        else:
+                            pair_number, pair_time = time_info, ""
+                    
+                    if datetime.strptime(current_time, "%H.%M") < pair_start_time_dt:
+                        if pd.notna(group_1_schedule) and group_1_schedule == group_2_schedule:
+                            return f"📚{pair_number}📚\n{pair_time}\n🫂{group_1_schedule}\n"
+                        if group == 1 and pd.notna(group_1_schedule):
+                            return f"📚{pair_number}📚\n{pair_time}\n{group_1_schedule}\n"
+                        elif group == 2 and pd.notna(group_2_schedule):
+                            return f"📚{pair_number}📚\n{pair_time}\n{group_2_schedule}\n"
+                except (ValueError, AttributeError):
+                    continue
+
+                # Если нашлись строки с практикой — добавляем строку "Практика в школе"
+                if practice_counter > 0:
+                    next_class = "Практика в школе.\n"
+                break
+
+    # Добавляем дату последнего обновления расписания
+    update_time = get_last_update_time()
+    schedule += f"\n📌 Дата последнего обновления: {update_time}"
+
+    return next_class
+
+# Главное меню
+@router.message(Command(commands=['start']))
+async def send_welcome(message: types.Message):
+    markup = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="1 группа"), KeyboardButton(text="2 группа")]
+        ],
+        resize_keyboard=True
+    )
+    await message.answer("Привет! Выбери свою группу:", reply_markup=markup)
+
+# Выбор группы
+@router.message(lambda message: message.text in ["1 группа", "2 группа"])
+async def choose_group(message: types.Message, state: FSMContext):
+    group = 1 if message.text == "1 группа" else 2
+    await state.update_data(group=group)
+    markup = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Сегодня"), KeyboardButton(text="Завтра")],
+            [KeyboardButton(text="Неделя"), KeyboardButton(text="Выбрать дату")],
+            [KeyboardButton(text="Следующая пара")]
+        ],
+        resize_keyboard=True
+    )
+    await message.answer(f"Вы выбрали {message.text}. Что показать?", reply_markup=markup)
+
+# Показ расписания
+@router.message(lambda message: message.text in ["Сегодня", "Завтра", "Неделя", "Выбрать дату", "Следующая пара"])
+async def show_schedule(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    group = data.get("group", 1)
+    today = datetime.now().date()
+    
+    if message.text == "Сегодня":
+        date = today
+        schedule = get_schedule(group, date)
+        await message.answer(f"Расписание на сегодня ({date.strftime('%d.%m.%Y')}):\n\n{schedule}\n📌 Дата последнего обновления: {update_time}")
+    elif message.text == "Завтра":
+        date = today + timedelta(days=1)
+        schedule = get_schedule(group, date)
+        await message.answer(f"Расписание на завтра ({date.strftime('%d.%m.%Y')}):\n\n{schedule}\n📌 Дата последнего обновления: {update_time}")
+    elif message.text == "Неделя":
+        schedule = "Расписание на неделю:\n"
+        for i in range(7):
+            date = today + timedelta(days=i)
+            daily_schedule = get_schedule(group, date)
+            schedule += f"\n{date.strftime('%d.%m.%Y')}:\n{daily_schedule}"
+        schedule += f"\n📌 Дата последнего обновления: {update_time}"
+        await message.answer(schedule)
+    elif message.text == "Выбрать дату":
+        await message.answer("Введите дату в формате ДД.ММ.ГГГГ:")
+    elif message.text == "Следующая пара":
+        current_time = datetime.now().strftime("%H.%M")
+        next_class = get_next_class(group, today, current_time)
+        next_class += f"\n\n📌 Дата последнего обновления: {update_time}"
+        await message.answer(next_class)
+        
+
+# Обработка ввода даты
+@router.message(lambda message: bool(datetime.strptime(message.text, "%d.%m.%Y") if message.text else False))
+async def custom_date_schedule(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    group = data.get("group", 1)
+    try:
+        date = datetime.strptime(message.text, "%d.%m.%Y").date()
+        schedule = get_schedule(group, date)
+        await message.answer(f"Расписание на {message.text}:\n\n{schedule}\n📌 Дата последнего обновления: {update_time} ")
+    except ValueError:
+        await message.answer("Неверный формат даты. Попробуйте ещё раз.")
+
+async def main():
+    logging.info("Бот запущен и готов к работе!")
+    dp.include_router(router)
+    asyncio.create_task(auto_update())  # Фоновая проверка обновлений
+    await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

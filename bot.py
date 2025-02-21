@@ -36,7 +36,34 @@ TEMP_FILE_PATH = "temp.xlsx"
 last_update_time = None
 UPDATE_INFO_FILE = "last_update.txt"
 UPDATE_TIME = "22:00" 
+ADMIN_ID = 916756380
 
+# Определение состояния для FSM
+class FeedbackState(StatesGroup):
+    waiting_for_feedback = State()
+
+# Обработчик команды /feedback
+@dp.message(Command("feedback"))
+async def feedback_command(message: types.Message, state: FSMContext):
+    await message.answer("📝 Оставьте ваш отзыв, и мы обязательно его передадим администратору. Спасибо за обратную связь!")
+    await state.set_state(FeedbackState.waiting_for_feedback)
+
+# Обработчик текстового сообщения с отзывом
+@dp.message(FeedbackState.waiting_for_feedback)
+async def receive_feedback(message: types.Message, state: FSMContext):
+    user = message.from_user
+    feedback_text = message.text
+    
+    # Отправляем отзыв администратору
+    admin_message = f"📩 Новый отзыв от @{user.username if user.username else user.first_name}:\n\n{feedback_text}"
+    await bot.send_message(ADMIN_ID, admin_message)
+    
+    # Подтверждаем пользователю отправку
+    await message.answer("✅ Ваш отзыв успешно отправлен! Спасибо за ваше мнение.")
+    
+    # Сбрасываем состояние
+    await state.clear()
+    
 # Хранение списка пользователей
 def load_users():
     if os.path.exists("users.txt"):

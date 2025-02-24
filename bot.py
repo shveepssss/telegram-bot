@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 
-
 import logging
 import asyncio
 import aiohttp
@@ -13,9 +12,11 @@ import re
 import sys
 import pytz
 import pandas as pd
+from aiogram import F
+from aiogram.filters import StateFilter
 from aiogram import Bot, Dispatcher, Router, types
 from aiogram.filters import Command
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -25,7 +26,7 @@ from openpyxl.utils import range_boundaries
 
 # Настройка логирования и бота
 logging.basicConfig(level=logging.INFO)
-TOKEN = "7766027837:AAFFORwPFg_CCZ5iEx0saTzCQL-ihXoHvNA"
+TOKEN = "7889962482:AAE9taDSQ99KT6__lRvFfucKqM35wSeXNFI"
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 router = Router()
@@ -39,17 +40,17 @@ UPDATE_TIME = "22:00"
 ADMIN_ID = 916756380
 UPDATE_STATUS_FILE = "update_status.txt"
 
+#Создает файл-флаг перед обновлением
 def set_update_flag():
-    """Создает файл-флаг перед обновлением."""
     with open(UPDATE_STATUS_FILE, "w") as file:
         file.write("updated")
 
+#Проверяет, было ли обновление перед перезапуском
 def check_update_flag():
-    """Проверяет, было ли обновление перед перезапуском."""
     return os.path.exists(UPDATE_STATUS_FILE)
 
+#Удаляет флаг обновления после перезапуска
 def clear_update_flag():
-    """Удаляет флаг обновления после перезапуска."""
     if os.path.exists(UPDATE_STATUS_FILE):
         os.remove(UPDATE_STATUS_FILE)
 
@@ -60,8 +61,31 @@ class FeedbackState(StatesGroup):
 # Обработчик команды /feedback
 @dp.message(Command("feedback"))
 async def feedback_command(message: types.Message, state: FSMContext):
-    await message.answer("📝 Оставьте ваш отзыв, и мы обязательно его передадим администратору. Спасибо за обратную связь!")
+    markup = InlineKeyboardMarkup(inline_keyboard=[  # Исправленная разметка
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_feedback")]
+    ])
+    await message.answer(f"📝 Оставьте ваш отзыв, и мы обязательно его передадим администратору. Спасибо за обратную связь!\nЕсли передумали, просто нажмите кнопку ниже.", reply_markup=markup)
     await state.set_state(FeedbackState.waiting_for_feedback)
+
+# Обработчик нажатия на кнопку отмены
+@dp.callback_query(F.data == "cancel_feedback", StateFilter(FeedbackState.waiting_for_feedback))
+async def cancel_feedback(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("Ввод отзыва отменен. Если захотите оставить мнение позже, мы всегда рады его услышать!")
+    user_data = await state.get_data()
+    group = user_data.get("group")
+    await state.clear()
+    
+    # Если группа сохранена, показываем пользователю соответствующие кнопки
+    if group:
+        await state.update_data(group=group)
+        markup = ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="Сегодня"), KeyboardButton(text="Завтра")],
+                [KeyboardButton(text="Неделя"), KeyboardButton(text="Выбрать дату")],
+                [KeyboardButton(text="Следующая пара")]
+            ],
+            resize_keyboard=True
+        )
 
 # Обработчик текстового сообщения с отзывом
 @dp.message(FeedbackState.waiting_for_feedback)
@@ -76,8 +100,21 @@ async def receive_feedback(message: types.Message, state: FSMContext):
     # Подтверждаем пользователю отправку
     await message.answer("✅ Ваш отзыв успешно отправлен! Спасибо за ваше мнение.")
     
-    # Сбрасываем состояние
+     # Получаем сохраненную группу из контекста
+    user_data = await state.get_data()
+    group = user_data.get("group")  # Получаем сохраненную группу
     await state.clear()
+    # Если группа сохранена, показываем пользователю соответствующие кнопки
+    if group:
+        await state.update_data(group=group)
+        markup = ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="Сегодня"), KeyboardButton(text="Завтра")],
+                [KeyboardButton(text="Неделя"), KeyboardButton(text="Выбрать дату")],
+                [KeyboardButton(text="Следующая пара")]
+            ],
+            resize_keyboard=True
+        )
 
 # Хранение списка пользователей
 def load_users():
@@ -116,8 +153,8 @@ def save_last_update(timestamp):
 
 last_update_time = load_last_update()
 
+#Чтение даты последнего обновления из файла
 def get_last_update_time():
-    """Читает дату последнего обновления из файла."""
     if os.path.exists("last_update.txt"):
         with open("last_update.txt", "r") as file:
             return file.read().strip()
@@ -125,8 +162,8 @@ def get_last_update_time():
 
 update_time = get_last_update_time()
 
+#Получение прямую ссылку на файл с Яндекс.Диска
 def get_direct_link(public_url):
-    """Получить прямую ссылку на файл с Яндекс.Диска."""
     api_url = "https://cloud-api.yandex.net/v1/disk/public/resources/download"
     params = {"public_key": public_url}
     response = requests.get(api_url, params=params)
@@ -136,8 +173,8 @@ def get_direct_link(public_url):
         logging.error(f"Ошибка получения ссылки: {response.status_code}")
         return None
 
+#Скачивание расписания с Яндекс.Диска с предварительным сравнением
 async def download_schedule():
-    """Скачивание расписания с Яндекс.Диска с предварительным сравнением."""
     global last_update_time
     direct_link = get_direct_link(SCHEDULE_URL)
     if not direct_link:
@@ -172,9 +209,8 @@ async def download_schedule():
         logging.error(f"Ошибка загрузки файла: {response.status_code}")
         return False
 
-    
+#Скачивание расписания с Яндекс.Диска  
 async def manual_download():
-    """Скачивание расписания с Яндекс.Диска."""
     global last_update_time
     direct_link = get_direct_link(SCHEDULE_URL)
     if not direct_link:
@@ -199,9 +235,8 @@ async def manual_download():
         logging.error(f"Ошибка загрузки файла: {response.status_code}")
         return False
 
-
+#Сравнение столбцов E и F двух файлов
 def compare_excel_files(file1, file2):
-    """Сравнивает столбцы E и F двух файлов."""
     try:
         df1 = pd.read_excel(file1, usecols=[4, 5])
         df2 = pd.read_excel(file2, usecols=[4, 5])
@@ -210,9 +245,8 @@ def compare_excel_files(file1, file2):
         logging.error(f"Ошибка сравнения файлов: {e}")
         return False
 
-
+#Оповещение пользователей о начале и окончании обновления
 async def notify_users():
-    """Оповещение пользователей о начале и окончании обновления."""
     for user_id in subscribed_users:
         try:
             await bot.send_message(user_id, "♻️ Пожалуйста, подождите, обновление расписания...")
@@ -226,9 +260,9 @@ async def notify_users_after_update():  # Функция для уведомле
             await bot.send_message(user_id, "📅 Расписание обновлено! Нажмите /start для обновления данных.")
         except Exception as e:
             logging.error(f"Ошибка при отправке сообщения пользователю {user_id}: {e}")
-
+            
+#Запуск обновление и перезапуск бота автоматически
 async def update_and_restart():
-    """Запускает обновление и перезапуск бота."""
     success = await download_schedule()
     if success:
         set_update_flag()  # Устанавливаем флаг перед рестартом
@@ -236,9 +270,9 @@ async def update_and_restart():
         os.execv(sys.executable, [sys.executable] + sys.argv)  # Перезапуск кода
     else:
         logging.error("Обновление не удалось.")
-
+        
+#Запуск обновление и перезапуск бота вручную
 async def manual_update_and_restart():
-    """Запускает обновление и перезапуск бота."""
     await notify_users()
     success = await manual_download()
     if success:
@@ -253,9 +287,8 @@ async def manual_update(message: types.Message):
     last_update_time = datetime.now().strftime('%d.%m.%Y %H:%M')
     save_last_update(last_update_time)
     await manual_update_and_restart()
-
+#Фоновая задача по проверке обновлений расписания
 async def auto_update():
-    """Фоновая задача по проверке обновлений расписания."""
     while True:
         now = datetime.now().strftime("%H:%M")
         await asyncio.sleep(60)  # Проверка каждую минуту
@@ -367,7 +400,7 @@ def get_schedule(group, date):
 def get_next_class(group, date, current_time):
     schedule = ""
     date_str = date.strftime("%Y-%m-%d")
-    next_class = "Сегодня больше нет занятий."
+    next_class = "Сегодня больше нет занятий.\n"
     practice_counter = 0  # Счётчик строк с практикой
 
     for i in range(len(df)):
@@ -500,5 +533,5 @@ async def main():
     await on_startup()  # Отправка сообщения при запуске (если требуется)
     await dp.start_polling(bot)
 
-if __name__ == "__main__" :
+if __name__ == "__main__":
     asyncio.run(main())

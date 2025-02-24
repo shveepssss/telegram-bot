@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+
 import logging
 import asyncio
 import aiohttp
@@ -7,6 +8,11 @@ import requests
 import schedule
 import time
 import os
+import openpyxl
+import re
+import sys
+import pytz
+import pandas as pd
 from aiogram import Bot, Dispatcher, Router, types
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
@@ -14,15 +20,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from datetime import datetime, timedelta
-import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.utils import range_boundaries
-import logging
-import openpyxl
-from datetime import datetime, timedelta
-import re
-import sys
-import pytz
 
 # Настройка логирования и бота
 logging.basicConfig(level=logging.INFO)
@@ -36,8 +35,23 @@ FILE_PATH = "44.03.01 Информатика.xlsx"
 TEMP_FILE_PATH = "temp.xlsx"
 last_update_time = None
 UPDATE_INFO_FILE = "last_update.txt"
-UPDATE_TIME = "22:00" 
+UPDATE_TIME = "22:00"
 ADMIN_ID = 916756380
+UPDATE_STATUS_FILE = "update_status.txt"
+
+def set_update_flag():
+    """Создает файл-флаг перед обновлением."""
+    with open(UPDATE_STATUS_FILE, "w") as file:
+        file.write("updated")
+
+def check_update_flag():
+    """Проверяет, было ли обновление перед перезапуском."""
+    return os.path.exists(UPDATE_STATUS_FILE)
+
+def clear_update_flag():
+    """Удаляет флаг обновления после перезапуска."""
+    if os.path.exists(UPDATE_STATUS_FILE):
+        os.remove(UPDATE_STATUS_FILE)
 
 # Определение состояния для FSM
 class FeedbackState(StatesGroup):
@@ -64,7 +78,7 @@ async def receive_feedback(message: types.Message, state: FSMContext):
     
     # Сбрасываем состояние
     await state.clear()
-    
+
 # Хранение списка пользователей
 def load_users():
     if os.path.exists("users.txt"):
@@ -217,6 +231,7 @@ async def update_and_restart():
     """Запускает обновление и перезапуск бота."""
     success = await download_schedule()
     if success:
+        set_update_flag()  # Устанавливаем флаг перед рестартом
         await notify_users()
         os.execv(sys.executable, [sys.executable] + sys.argv)  # Перезапуск кода
     else:
@@ -227,6 +242,7 @@ async def manual_update_and_restart():
     await notify_users()
     success = await manual_download()
     if success:
+        set_update_flag()  # Устанавливаем флаг перед рестартом
         os.execv(sys.executable, [sys.executable] + sys.argv)  # Перезапуск кода
     else:
         logging.error("Обновление не удалось.")
@@ -340,14 +356,12 @@ def get_schedule(group, date):
                     elif group == 2 and pd.notna(group_2_schedule):
                         schedule += f"📚{pair_number}📚\n{pair_time}\n{group_2_schedule}\n"
 
-
             # Если нашлись строки с практикой — добавляем строку "Практика в школе"
             if practice_counter > 0:
                 schedule += "Практика в школе.\n"
             break
         
     return schedule if found_date and schedule.strip() else "Нет занятий.\n"
-
 
 # Функция для поиска следующей пары
 def get_next_class(group, date, current_time):
@@ -454,7 +468,7 @@ async def show_schedule(message: types.Message, state: FSMContext):
     elif message.text == "Следующая пара":
         current_time = datetime.now().strftime("%H.%M")
         next_class = get_next_class(group, today, current_time)
-        next_class += f"\n\n📌 Дата последнего обновления: {update_time}"
+        next_class += f"\n📌 Дата последнего обновления: {update_time}"
         await message.answer(next_class)
         
 
@@ -470,12 +484,21 @@ async def custom_date_schedule(message: types.Message, state: FSMContext):
     except ValueError:
         await message.answer("Неверный формат даты. Попробуйте ещё раз.")
 
+async def on_startup():
+    if not check_update_flag():
+        for user_id in subscribed_users:
+            try:
+                await bot.send_message(user_id, "⚙️ Бот был перезагружен. Нажмите /start для правильного отображения данных.")
+            except Exception as e:
+                logging.error(f"Ошибка отправки сообщения пользователю {user_id}: {e}")
+    clear_update_flag()  # После отправки сообщения очищаем флаг
+
 async def main():
     logging.info("Бот запущен и готов к работе!")
     dp.include_router(router)
     asyncio.create_task(auto_update())  # Фоновая проверка обновлений
+    await on_startup()  # Отправка сообщения при запуске (если требуется)
     await dp.start_polling(bot)
 
-
-if __name__ == "__main__":
+if __name__ == "__main__" :
     asyncio.run(main())

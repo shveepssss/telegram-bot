@@ -26,7 +26,7 @@ from openpyxl.utils import range_boundaries
 
 # Настройка логирования и бота
 logging.basicConfig(level=logging.INFO)
-TOKEN = "7889962482:AAE9taDSQ99KT6__lRvFfucKqM35wSeXNFI"
+TOKEN = "7766027837:AAFFORwPFg_CCZ5iEx0saTzCQL-ihXoHvNA"
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 router = Router()

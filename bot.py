@@ -287,6 +287,7 @@ async def manual_update(message: types.Message):
     last_update_time = datetime.now().strftime('%d.%m.%Y %H:%M')
     save_last_update(last_update_time)
     await manual_update_and_restart()
+    
 #Фоновая задача по проверке обновлений расписания
 async def auto_update():
     while True:
@@ -296,10 +297,8 @@ async def auto_update():
             logging.info("Начинаю автоматическое обновление...")
             await update_and_restart()
     
-
 # Функция для подготовки данных из Excel
 def unmerge_and_fill_cells(sheet):
-    """Разъединяет объединённые ячейки и заполняет каждую значением верхней левой."""
     for merged_cell in list(sheet.merged_cells.ranges):
         min_col, min_row, max_col, max_row = range_boundaries(str(merged_cell))
         top_left_value = sheet.cell(row=min_row, column=min_col).value  # Берём значение верхней левой ячейки
@@ -309,8 +308,8 @@ def unmerge_and_fill_cells(sheet):
             for col in range(min_col, max_col + 1):
                 sheet.cell(row=row, column=col).value = top_left_value  # Заполняем разъединённые ячейки
 
+#Удаляет лишние пробелы и переносы строк в столбце B
 def clean_column_b(file_path):
-    """Удаляет лишние пробелы и переносы строк в столбце B."""
     wb = load_workbook(file_path)
     sheet = wb.active
 
@@ -329,7 +328,6 @@ wb.save("44.03.01 Информатика_unmerged.xlsx")
 
 clean_column_b("44.03.01 Информатика_unmerged.xlsx")  # Очистка столбца B
 
-
 # Открываем новый файл после обработки объединенных ячеек
 def load_transformed_schedule(file_path="44.03.01 Информатика_unmerged.xlsx"):
     if 'openpyxl' in sys.modules:
@@ -344,7 +342,6 @@ def load_transformed_schedule(file_path="44.03.01 Информатика_unmerge
     df = pd.DataFrame(data, columns=columns)
     return df
 
-
 # Используем новый файл для работы в get_schedule
 df = load_transformed_schedule()
 
@@ -355,8 +352,10 @@ def get_schedule(group, date):
     
     schedule = ""
     date_str = date.strftime("%Y-%m-%d")
+    today = datetime.now().date()
     found_date = False
     practice_counter = 0  # Счётчик строк с практикой
+    current_time = datetime.now().strftime("%H.%M")  # Получаем текущее время в формате ЧЧ.ММ
 
     for i in range(len(df)):
         cell_date = pd.to_datetime(df.iloc[i, 0], errors='coerce')
@@ -380,14 +379,26 @@ def get_schedule(group, date):
                         pair_time = match.group(2)
                     else:
                         pair_number, pair_time = time_info, ""  # Если не удалось разделить корректно
+
+                    pair_text = ""  # Инициализация переменной для текста пары
+
+                    # Определяем текущую пару
+                    is_current = date == today and is_current_pair(pair_time, current_time)
                     
                     # Формируем строку расписания
                     if pd.notna(group_1_schedule) and pd.notna(group_2_schedule) and group_1_schedule == group_2_schedule:
-                        schedule += f"📚{pair_number}📚\n{pair_time}\n🫂{group_1_schedule}\n"
+                        pair_text = f"📚{pair_number}📚\n{pair_time}\n🫂{group_1_schedule}\n"
                     elif group == 1 and pd.notna(group_1_schedule):
-                        schedule += f"📚{pair_number}📚\n{pair_time}\n{group_1_schedule}\n"
+                        pair_text = f"📚{pair_number}📚\n{pair_time}\n{group_1_schedule}\n"
                     elif group == 2 and pd.notna(group_2_schedule):
-                        schedule += f"📚{pair_number}📚\n{pair_time}\n{group_2_schedule}\n"
+                        pair_text = f"📚{pair_number}📚\n{pair_time}\n{group_2_schedule}\n"
+
+                    # Добавляем выделение текущей пары
+                    if is_current:
+                        pair_text = f"<b>{pair_text}</b>"
+
+                    # Добавляем в расписание
+                    schedule += pair_text
 
             # Если нашлись строки с практикой — добавляем строку "Практика в школе"
             if practice_counter > 0:
@@ -395,6 +406,21 @@ def get_schedule(group, date):
             break
         
     return schedule if found_date and schedule.strip() else "Нет занятий.\n"
+
+# Функция для проверки, является ли пара текущей
+def is_current_pair(pair_time, current_time):
+    try:
+        start_time_str, end_time_str = pair_time.split('-')
+        start_time = datetime.strptime(start_time_str, "%H.%M")
+        end_time = datetime.strptime(end_time_str, "%H.%M")
+
+        # Сравниваем текущее время с временем начала и окончания пары
+        current_time_dt = datetime.strptime(current_time, "%H.%M")
+        if start_time <= current_time_dt <= end_time:
+            return True
+    except ValueError:
+        return False
+    return False
 
 # Функция для поиска следующей пары
 def get_next_class(group, date, current_time):
@@ -483,7 +509,7 @@ async def show_schedule(message: types.Message, state: FSMContext):
     if message.text == "Сегодня":
         date = today
         schedule = get_schedule(group, date)
-        await message.answer(f"Расписание на сегодня ({date.strftime('%d.%m.%Y')}):\n\n{schedule}\n📌 Дата последнего обновления: {update_time}")
+        await message.answer(f"Расписание на сегодня ({date.strftime('%d.%m.%Y')}):\n\n{schedule}\n📌 Дата последнего обновления: {update_time}", parse_mode="HTML")
     elif message.text == "Завтра":
         date = today + timedelta(days=1)
         schedule = get_schedule(group, date)
@@ -495,7 +521,7 @@ async def show_schedule(message: types.Message, state: FSMContext):
             daily_schedule = get_schedule(group, date)
             schedule += f"\n{date.strftime('%d.%m.%Y')}:\n{daily_schedule}"
         schedule += f"\n📌 Дата последнего обновления: {update_time}"
-        await message.answer(schedule)
+        await message.answer(schedule, parse_mode="HTML")
     elif message.text == "Выбрать дату":
         await message.answer("Введите дату в формате ДД.ММ.ГГГГ:")
     elif message.text == "Следующая пара":
@@ -513,7 +539,7 @@ async def custom_date_schedule(message: types.Message, state: FSMContext):
     try:
         date = datetime.strptime(message.text, "%d.%m.%Y").date()
         schedule = get_schedule(group, date)
-        await message.answer(f"Расписание на {message.text}:\n\n{schedule}\n📌 Дата последнего обновления: {update_time} ")
+        await message.answer(f"Расписание на {message.text}:\n\n{schedule}\n📌 Дата последнего обновления: {update_time}", parse_mode="HTML")
     except ValueError:
         await message.answer("Неверный формат даты. Попробуйте ещё раз.")
 

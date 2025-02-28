@@ -350,7 +350,7 @@ def get_schedule(group, date):
 
     df = load_transformed_schedule()  # Загружаем актуальные данные
     
-    schedule = ""
+    schedule = []
     date_str = date.strftime("%Y-%m-%d")
     today = datetime.now().date()
     found_date = False
@@ -394,18 +394,20 @@ def get_schedule(group, date):
                         pair_text = f"📚{pair_number}📚\n{pair_time}\n{group_2_schedule}\n"
 
                     # Добавляем выделение текущей пары
-                    if is_current:
+                    if is_current and pair_text:
                         pair_text = f"<b>{pair_text}</b>"
 
                     # Добавляем в расписание
-                    schedule += pair_text
+                    if pair_text.strip(): 
+                        schedule.append(pair_text)
 
             # Если нашлись строки с практикой — добавляем строку "Практика в школе"
             if practice_counter > 0:
-                schedule += "Практика в школе.\n"
-            break
+                schedule.append("Практика в школе.\n")
         
-    return schedule if found_date and schedule.strip() else "Нет занятий.\n"
+            break
+
+    return "".join(schedule) if found_date and schedule else "Нет занятий.\n"
 
 # Функция для проверки, является ли пара текущей
 def is_current_pair(pair_time, current_time):
